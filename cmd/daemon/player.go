@@ -143,14 +143,30 @@ func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg dealer.Message)
 			}
 			isDJCluster := false
 			if clusterState != nil {
-				for _, t := range clusterState.NextTracks {
-					if player.IsDJTrack(t) {
-						isDJCluster = true
-						break
+				// Primary check: PlayOrigin.FeatureIdentifier == "dynamic-sessions".
+				// This is reliably set by the server for DJ sessions on both desktop
+				// and speaker/zeroconf devices.
+				if clusterState.PlayOrigin != nil && clusterState.PlayOrigin.FeatureIdentifier == "dynamic-sessions" {
+					isDJCluster = true
+				}
+				// Fallback: check source.components on individual tracks (populated
+				// on desktop/interactive clients but often absent on speaker devices).
+				if !isDJCluster {
+					for _, t := range clusterState.NextTracks {
+						if player.IsDJTrack(t) {
+							isDJCluster = true
+							break
+						}
 					}
 				}
 			}
-			p.app.log.Debugf("cluster update received (active=%t, nextTracks=%d, djCluster=%t)", p.state.active, nextCount, isDJCluster)
+			p.app.log.Debugf("cluster update received (active=%t, nextTracks=%d, djCluster=%t, featureId=%s)",
+				p.state.active, nextCount, isDJCluster, func() string {
+					if clusterState != nil && clusterState.PlayOrigin != nil {
+						return clusterState.PlayOrigin.FeatureIdentifier
+					}
+					return ""
+				}())
 
 			// Log what the server echoes back about our device's capabilities.
 			if ourDevice := clusterUpdate.Cluster.Device[p.app.deviceId]; ourDevice != nil && ourDevice.Capabilities != nil {
