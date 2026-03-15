@@ -179,9 +179,12 @@ func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg dealer.Message)
 				// (b) Accepted a DJ play command but have no tracks yet (ContextUri set,
 				//     no track loaded) — start playing from the cluster's current track.
 				// Use djCachedContextUri to detect active DJ sessions. IsDJTrack() is
-			// unreliable here because regular music tracks in a DJ queue don't carry
+			// unreliable because regular music tracks in a DJ queue don't carry
 			// YourDJ source metadata, and transferred tracks never do.
-			alreadyDJ := p.state.active && p.state.player.Track != nil && contextUri == p.djCachedContextUri
+			// Guard with !djAwaitingLoad so this path doesn't fire during the initial
+			// DJ selection (when we're still waiting for the first track from the
+			// cluster) — that case is handled by pendingDJ below.
+			alreadyDJ := p.state.active && p.state.player.Track != nil && contextUri == p.djCachedContextUri && !p.djAwaitingLoad
 				pendingDJ := p.djAwaitingLoad && p.state.player.ContextUri == contextUri
 				if alreadyDJ || pendingDJ {
 					currentTrack := func() *connectpb.ContextTrack {
