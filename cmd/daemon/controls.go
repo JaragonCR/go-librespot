@@ -259,6 +259,12 @@ func (p *AppPlayer) loadContext(ctx context.Context, spotCtx *connectpb.Context,
 				p.state.player.PositionAsOfTimestamp = 0
 				p.app.djCachedContextUri = spotCtx.Uri
 				p.djAwaitingLoad = true
+				// Stop the player so Spotify sees IsPlaying=false and sends the first DJ track.
+				p.player.Stop()
+				p.primaryStream = nil
+				p.secondaryStream = nil
+				p.state.player.IsPlaying = false
+				p.state.player.IsBuffering = false
 				p.updateState(ctx)
 				return nil
 			}
@@ -446,6 +452,12 @@ func (p *AppPlayer) loadCurrentTrack(ctx context.Context, paused, drop bool) err
 
 		var err error
 		p.primaryStream, err = p.player.NewStream(ctx, p.app.client, *spotId, p.app.cfg.Bitrate, trackPosition)
+		if err != nil && trackPosition > 0 {
+			p.app.log.WithError(err).Warnf("failed creating stream at %dms for %s, retrying from 0", trackPosition, spotId)
+			p.state.player.PositionAsOfTimestamp = 0
+			trackPosition = 0
+			p.primaryStream, err = p.player.NewStream(ctx, p.app.client, *spotId, p.app.cfg.Bitrate, 0)
+		}
 		if err != nil {
 			return fmt.Errorf("failed creating stream for %s: %w", spotId, err)
 		}
@@ -799,6 +811,12 @@ func (p *AppPlayer) advanceNext(ctx context.Context, forceNext, drop bool) (bool
 			if p.djAwaitingLoad {
 				if p.state.player.ContextUri == p.app.djCachedContextUri {
 					p.app.log.Debugf("advanceNext: djAwaitingLoad=true, waiting for DJ cluster/queue (context=%s)", p.state.player.ContextUri)
+					// Ensure player is stopped so Spotify sees IsPlaying=false and sends tracks.
+					p.player.Stop()
+					p.primaryStream = nil
+					p.secondaryStream = nil
+					p.state.player.IsPlaying = false
+					p.state.player.IsBuffering = false
 					p.updateState(ctx)
 					return false, nil
 				}
@@ -821,6 +839,12 @@ func (p *AppPlayer) advanceNext(ctx context.Context, forceNext, drop bool) (bool
 				isDJ := p.state.player.PlayOrigin != nil && p.state.player.PlayOrigin.FeatureIdentifier == "dynamic-sessions"
 				if isDJ {
 					// Signal the server that we need more tracks.
+					// Stop the player so Spotify sees IsPlaying=false and actually responds.
+					p.player.Stop()
+					p.primaryStream = nil
+					p.secondaryStream = nil
+					p.state.player.IsPlaying = false
+					p.state.player.IsBuffering = false
 					p.djAwaitingLoad = true
 					p.updateState(ctx)
 					return false, nil

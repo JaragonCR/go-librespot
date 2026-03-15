@@ -316,12 +316,6 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 		p.state.player.PlayOrigin = transferState.CurrentSession.PlayOrigin
 		p.state.player.PlayOrigin.DeviceIdentifier = req.SentByDeviceId
 		p.app.log.Debugf("transfer PlayOrigin.FeatureIdentifier=%q", p.state.player.PlayOrigin.FeatureIdentifier)
-		// For DJ (dynamic-sessions) transfers, PositionAsOfTimestamp is the
-		// cumulative session position (not position within this individual track).
-		// Reset to 0 to avoid seeking past the end of the OGG file.
-		if p.state.player.PlayOrigin.FeatureIdentifier == "dynamic-sessions" {
-			p.state.player.PositionAsOfTimestamp = 0
-		}
 		p.state.player.ContextUri = transferState.CurrentSession.Context.Uri
 		p.state.player.ContextUrl = transferState.CurrentSession.Context.Url
 		p.state.player.ContextRestrictions = transferState.CurrentSession.Context.Restrictions
