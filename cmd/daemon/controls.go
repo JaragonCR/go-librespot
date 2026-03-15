@@ -596,9 +596,18 @@ func (p *AppPlayer) addToQueue(ctx context.Context, track *connectpb.ContextTrac
 }
 
 func (p *AppPlayer) setQueue(ctx context.Context, prev []*connectpb.ContextTrack, next []*connectpb.ContextTrack) {
+	p.app.log.Debugf("set_queue received: prev=%d next=%d (djAwaitingLoad=%t)", len(prev), len(next), p.djAwaitingLoad)
+
 	if p.state.tracks == nil {
 		p.app.log.Warnf("cannot set queue without a context")
 		return
+	}
+
+	// If Spotify delivers DJ tracks via set_queue (rather than cluster nextTracks),
+	// cache them so the pendingDJ path can build a real track list from them.
+	if len(next) > 0 && p.app.djCachedContextUri != "" && p.state.player.ContextUri == p.app.djCachedContextUri {
+		p.app.log.Debugf("caching %d DJ tracks from set_queue for %s", len(next), p.app.djCachedContextUri)
+		p.app.djCachedNextTracks = next
 	}
 
 	p.state.tracks.SetQueue(prev, next)
@@ -788,11 +797,13 @@ func (p *AppPlayer) advanceNext(ctx context.Context, forceNext, drop bool) (bool
 			// song. Signal the server and wait for the cluster push instead.
 			if p.djAwaitingLoad {
 				if p.state.player.ContextUri == p.app.djCachedContextUri {
+					p.app.log.Debugf("advanceNext: djAwaitingLoad=true, waiting for DJ cluster/queue (context=%s)", p.state.player.ContextUri)
 					p.updateState(ctx)
 					return false, nil
 				}
 				// Stale flag from a previous DJ session; clear it so normal
 				// playlists are not blocked.
+				p.app.log.Debugf("advanceNext: clearing stale djAwaitingLoad (context=%s, cachedDJ=%s)", p.state.player.ContextUri, p.app.djCachedContextUri)
 				p.djAwaitingLoad = false
 			}
 
@@ -801,11 +812,12 @@ func (p *AppPlayer) advanceNext(ctx context.Context, forceNext, drop bool) (bool
 
 			// if we could not get the next track we probably ended the context
 			if !hasNextTrack {
-				// DJ contexts manage their queue externally via ClusterUpdate — do not
-				// loop back to track 0 or attempt autoplay when the list is exhausted.
-				// Use djCachedContextUri to reliably detect DJ sessions regardless of
-				// whether the current track carries YourDJ source metadata.
-				isDJ := p.app.djCachedContextUri != "" && p.state.player.ContextUri == p.app.djCachedContextUri
+				// DJ contexts manage their queue externally via ClusterUpdate/set_queue —
+				// do not loop back to track 0 or attempt autoplay when exhausted.
+				// Use PlayOrigin.FeatureIdentifier so this only fires when we are
+				// actually in an active DJ session, not whenever any playlist whose
+				// URI was previously used as a DJ seed reaches its end.
+				isDJ := p.state.player.PlayOrigin != nil && p.state.player.PlayOrigin.FeatureIdentifier == "dynamic-sessions"
 				if isDJ {
 					// Signal the server that we need more tracks.
 					p.djAwaitingLoad = true
