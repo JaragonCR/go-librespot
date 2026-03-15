@@ -256,6 +256,7 @@ func (p *AppPlayer) loadContext(ctx context.Context, spotCtx *connectpb.Context,
 				p.app.log.WithError(err).Warnf("no tracks in play command payload for %s, waiting for cluster update", spotCtx.Uri)
 				p.state.player.ContextUri = spotCtx.Uri
 				p.state.player.ContextUrl = spotCtx.Url
+				p.state.player.PositionAsOfTimestamp = 0
 				p.app.djCachedContextUri = spotCtx.Uri
 				p.djAwaitingLoad = true
 				p.updateState(ctx)

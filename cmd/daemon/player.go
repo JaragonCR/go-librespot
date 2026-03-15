@@ -223,6 +223,9 @@ func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg dealer.Message)
 					if pendingDJ {
 						p.djAwaitingLoad = false
 						p.state.player.ContextUri = contextUri
+						// Reset position: PositionAsOfTimestamp may carry over from the
+						// previous playlist session and seek past the file end.
+						p.state.player.PositionAsOfTimestamp = 0
 						if err := p.loadCurrentTrack(ctx, false, true); err != nil {
 							p.app.log.WithError(err).Warn("failed loading initial DJ track from cluster push")
 						}
