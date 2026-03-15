@@ -18,6 +18,7 @@ import (
 
 	"github.com/devgianlu/go-librespot/apresolve"
 	"github.com/devgianlu/go-librespot/player"
+	connectpb "github.com/devgianlu/go-librespot/proto/spotify/connectstate"
 	devicespb "github.com/devgianlu/go-librespot/proto/spotify/connectstate/devices"
 	"github.com/devgianlu/go-librespot/session"
 	"github.com/devgianlu/go-librespot/zeroconf"
@@ -52,6 +53,11 @@ type App struct {
 	server   ApiServer
 	mpris    mpris.Server
 	logoutCh chan *AppPlayer
+
+	// DJ cache persists across zeroconf reconnects so that a transfer command
+	// arriving on a new session can still use the queue from the last cluster push.
+	djCachedContextUri string
+	djCachedNextTracks []*connectpb.ContextTrack
 }
 
 func parseDeviceType(val string) (devicespb.DeviceType, error) {

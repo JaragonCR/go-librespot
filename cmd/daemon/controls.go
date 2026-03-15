@@ -245,9 +245,9 @@ func (p *AppPlayer) loadContext(ctx context.Context, spotCtx *connectpb.Context,
 			staticTracks = append(staticTracks, page.Tracks...)
 		}
 		if len(staticTracks) == 0 {
-			if len(p.djCachedNextTracks) > 0 && p.djCachedContextUri == spotCtx.Uri {
+			if len(p.app.djCachedNextTracks) > 0 && p.app.djCachedContextUri == spotCtx.Uri {
 				// Reuse the DJ queue from the most recent ClusterUpdate.
-				staticTracks = append(staticTracks, p.djCachedNextTracks...)
+				staticTracks = append(staticTracks, p.app.djCachedNextTracks...)
 				p.app.log.WithError(err).Warnf("using cached DJ queue for play command %s (%d tracks)", spotCtx.Uri, len(staticTracks))
 			} else {
 				// DJ contexts send no tracks in play command payloads — Spotify will follow up
@@ -256,7 +256,7 @@ func (p *AppPlayer) loadContext(ctx context.Context, spotCtx *connectpb.Context,
 				p.app.log.WithError(err).Warnf("no tracks in play command payload for %s, waiting for cluster update", spotCtx.Uri)
 				p.state.player.ContextUri = spotCtx.Uri
 				p.state.player.ContextUrl = spotCtx.Url
-				p.djCachedContextUri = spotCtx.Uri
+				p.app.djCachedContextUri = spotCtx.Uri
 				p.djAwaitingLoad = true
 				p.updateState(ctx)
 				return nil
@@ -800,7 +800,7 @@ func (p *AppPlayer) advanceNext(ctx context.Context, forceNext, drop bool) (bool
 				// loop back to track 0 or attempt autoplay when the list is exhausted.
 				// Use djCachedContextUri to reliably detect DJ sessions regardless of
 				// whether the current track carries YourDJ source metadata.
-				isDJ := p.djCachedContextUri != "" && p.state.player.ContextUri == p.djCachedContextUri
+				isDJ := p.app.djCachedContextUri != "" && p.state.player.ContextUri == p.app.djCachedContextUri
 				if isDJ {
 					// Signal the server that we need more tracks.
 					p.djAwaitingLoad = true

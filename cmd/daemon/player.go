@@ -56,11 +56,6 @@ type AppPlayer struct {
 	// should start once the narration finishes (EventTypeNotPlaying).
 	djPendingMusicId *librespot.SpotifyId
 
-	// djCachedNextTracks caches the NextTracks from the most recent DJ ClusterUpdate.
-	// Used by the transfer handler to populate the full DJ queue instead of a 1-track list.
-	djCachedNextTracks []*connectpb.ContextTrack
-	djCachedContextUri string
-
 	// djAwaitingLoad is set when a DJ play command was accepted but context resolution
 	// returned no tracks (empty spclient pages). Cleared once the first DJ track loads.
 	// This lets the ClusterUpdate handler distinguish "transitioning into DJ" (should load)
@@ -180,11 +175,11 @@ func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg dealer.Message)
 				if contextUri == "" {
 					contextUri = p.state.player.ContextUri
 				}
-				p.djCachedContextUri = contextUri
-				p.djCachedNextTracks = make([]*connectpb.ContextTrack, 0, nextCount)
+				p.app.djCachedContextUri = contextUri
+				p.app.djCachedNextTracks = make([]*connectpb.ContextTrack, 0, nextCount)
 				for _, t := range clusterState.NextTracks {
 					if t.Uri != "spotify:delimiter" {
-						p.djCachedNextTracks = append(p.djCachedNextTracks, librespot.ProvidedTrackToContextTrack(t))
+						p.app.djCachedNextTracks = append(p.app.djCachedNextTracks, librespot.ProvidedTrackToContextTrack(t))
 					}
 				}
 				p.app.log.Debugf("cached DJ next tracks from cluster push (%d tracks for %s)", nextCount, contextUri)
@@ -200,7 +195,7 @@ func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg dealer.Message)
 			// Guard with !djAwaitingLoad so this path doesn't fire during the initial
 			// DJ selection (when we're still waiting for the first track from the
 			// cluster) — that case is handled by pendingDJ below.
-			alreadyDJ := p.state.active && p.state.player.Track != nil && contextUri == p.djCachedContextUri && !p.djAwaitingLoad
+			alreadyDJ := p.state.active && p.state.player.Track != nil && contextUri == p.app.djCachedContextUri && !p.djAwaitingLoad
 				pendingDJ := p.djAwaitingLoad && p.state.player.ContextUri == contextUri
 				if alreadyDJ || pendingDJ {
 					currentTrack := func() *connectpb.ContextTrack {
@@ -210,11 +205,11 @@ func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg dealer.Message)
 						if clusterState.Track != nil {
 							return librespot.ProvidedTrackToContextTrack(clusterState.Track)
 						}
-						return p.djCachedNextTracks[0]
+						return p.app.djCachedNextTracks[0]
 					}()
 					ctxTracks := make([]*connectpb.ContextTrack, 0, nextCount+1)
 					ctxTracks = append(ctxTracks, currentTrack)
-					ctxTracks = append(ctxTracks, p.djCachedNextTracks...)
+					ctxTracks = append(ctxTracks, p.app.djCachedNextTracks...)
 					resolver := spclient.NewStaticContextResolver(p.app.log, contextUri, ctxTracks)
 					newList := tracks.NewTrackListFromResolver(p.app.log, resolver)
 					ctxType := librespot.InferSpotifyIdTypeFromContextUri(contextUri)
@@ -277,8 +272,8 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 			// otherwise fall back to the current track + queue from the transfer state.
 			contextUri := transferState.CurrentSession.Context.Uri
 			staticTracks := []*connectpb.ContextTrack{transferState.Playback.CurrentTrack}
-			if len(p.djCachedNextTracks) > 0 && p.djCachedContextUri == contextUri {
-				staticTracks = append(staticTracks, p.djCachedNextTracks...)
+			if len(p.app.djCachedNextTracks) > 0 && p.app.djCachedContextUri == contextUri {
+				staticTracks = append(staticTracks, p.app.djCachedNextTracks...)
 				p.app.log.WithError(err).Warnf("context resolution failed, using cached DJ queue for %s (%d tracks)", contextUri, len(staticTracks))
 			} else {
 				staticTracks = append(staticTracks, transferState.Queue.Tracks...)
@@ -286,7 +281,7 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 				// Mark as a known DJ context so advanceNext won't attempt autoplay.
 				// Do NOT set djAwaitingLoad — we are already on the transferred track
 				// and must not reload it when the cluster update arrives.
-				p.djCachedContextUri = contextUri
+				p.app.djCachedContextUri = contextUri
 			}
 			resolver := spclient.NewStaticContextResolver(p.app.log, contextUri, staticTracks)
 			ctxTracks = tracks.NewTrackListFromResolver(p.app.log, resolver)
