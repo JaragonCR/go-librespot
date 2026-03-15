@@ -149,6 +149,7 @@ func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err 
 
 	if appPlayer.player, err = player.NewPlayer(&player.Options{
 		Spclient: appPlayer.sess.Spclient(),
+		Mercury:  appPlayer.sess.Mercury(),
 		AudioKey: appPlayer.sess.AudioKey(),
 		Events:   appPlayer.sess.Events(),
 		Log:      app.log,

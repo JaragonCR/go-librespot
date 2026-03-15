@@ -144,12 +144,13 @@ func (p *AppPlayer) initState() {
 				SupportsSetBackendMetadata: true,
 				SupportsTransferCommand:    true,
 				SupportsCommandRequest:     true,
-				IsVoiceEnabled:             false,
+				IsVoiceEnabled:             true,
 				NeedsFullPlayerState:       false,
 				SupportsGzipPushes:         true,
 				SupportsSetOptionsCommand:  true,
 				SupportsHifi:               nil, // TODO: nice to have?
 				ConnectCapabilities:        "",
+				SupportsDj:                 true,
 			},
 		},
 	}

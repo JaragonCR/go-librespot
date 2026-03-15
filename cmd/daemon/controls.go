@@ -17,6 +17,7 @@ import (
 	"github.com/devgianlu/go-librespot/player"
 	connectpb "github.com/devgianlu/go-librespot/proto/spotify/connectstate"
 	playerpb "github.com/devgianlu/go-librespot/proto/spotify/player"
+	"github.com/devgianlu/go-librespot/spclient"
 	"github.com/devgianlu/go-librespot/tracks"
 	"google.golang.org/protobuf/proto"
 )
@@ -182,6 +183,17 @@ func (p *AppPlayer) handlePlayerEvent(ctx context.Context, ev *player.Event) {
 			},
 		})
 	case player.EventTypeNotPlaying:
+		// If a DJ narration just finished, load the music track immediately
+		// instead of advancing the context queue.
+		if p.djPendingMusicId != nil {
+			pendingId := p.djPendingMusicId
+			p.djPendingMusicId = nil
+			if err := p.loadDJPendingMusic(ctx, pendingId); err != nil {
+				p.app.log.WithError(err).Error("failed loading DJ music after narration")
+			}
+			return
+		}
+
 		p.sess.Events().OnPlayerEnd(p.primaryStream, p.state.trackPosition())
 
 		p.app.server.Emit(&ApiEvent{
@@ -226,7 +238,33 @@ type skipToFunc func(*connectpb.ContextTrack) bool
 func (p *AppPlayer) loadContext(ctx context.Context, spotCtx *connectpb.Context, skipTo skipToFunc, paused, drop bool) error {
 	ctxTracks, err := tracks.NewTrackListFromContext(ctx, p.app.log, p.sess.Spclient(), spotCtx)
 	if err != nil {
-		return fmt.Errorf("failed creating track list: %w", err)
+		// Dynamic contexts (e.g. Spotify DJ) return empty pages from spclient.
+		// Use whatever tracks Spotify sent in the play command's context pages.
+		var staticTracks []*connectpb.ContextTrack
+		for _, page := range spotCtx.Pages {
+			staticTracks = append(staticTracks, page.Tracks...)
+		}
+		if len(staticTracks) == 0 {
+			if len(p.djCachedNextTracks) > 0 && p.djCachedContextUri == spotCtx.Uri {
+				// Reuse the DJ queue from the most recent ClusterUpdate.
+				staticTracks = append(staticTracks, p.djCachedNextTracks...)
+				p.app.log.WithError(err).Warnf("using cached DJ queue for play command %s (%d tracks)", spotCtx.Uri, len(staticTracks))
+			} else {
+				// DJ contexts send no tracks in play command payloads — Spotify will follow up
+				// with a ClusterUpdate or set_queue. Accept the command and return nil so
+				// Spotify stops retrying. Update context URI so the cluster sync can match.
+				p.app.log.WithError(err).Warnf("no tracks in play command payload for %s, waiting for cluster update", spotCtx.Uri)
+				p.state.player.ContextUri = spotCtx.Uri
+				p.state.player.ContextUrl = spotCtx.Url
+				p.djCachedContextUri = spotCtx.Uri
+				p.djAwaitingLoad = true
+				p.updateState(ctx)
+				return nil
+			}
+		}
+		p.app.log.WithError(err).Warnf("context resolution failed, building static track list for %s (%d tracks)", spotCtx.Uri, len(staticTracks))
+		resolver := spclient.NewStaticContextResolver(p.app.log, spotCtx.Uri, staticTracks)
+		ctxTracks = tracks.NewTrackListFromResolver(p.app.log, resolver)
 	}
 
 	p.state.setPaused(paused)
@@ -305,11 +343,75 @@ func (p *AppPlayer) loadCurrentTrack(ctx context.Context, paused, drop bool) err
 		p.primaryStream = nil
 	}
 
-	spotId, err := librespot.SpotifyIdFromUri(p.state.player.Track.Uri)
+	// Skip delimiter tracks (used as queue separators in DJ mode).
+	if p.state.player.Track.Uri == "spotify:delimiter" {
+		return librespot.ErrMediaRestricted
+	}
+	// Normalize spotify:media:<id> → spotify:track:<id> (used in some DJ queue pushes).
+	trackUri := strings.ReplaceAll(p.state.player.Track.Uri, "spotify:media:", "spotify:track:")
+	spotId, err := librespot.SpotifyIdFromUri(trackUri)
 	if err != nil {
 		return fmt.Errorf("failed parsing uri: %w", err)
 	} else if spotId.Type() != librespot.SpotifyIdTypeTrack && spotId.Type() != librespot.SpotifyIdTypeEpisode {
 		return fmt.Errorf("unsupported spotify type: %s", spotId.Type())
+	}
+
+	// Clear any stale DJ narration state.
+	p.djPendingMusicId = nil
+
+	// If this is a DJ track with narration, load the narration clip as the primary
+	// stream and remember the music track to play after it.
+	// Try intro (session start), then jump (between tracks), then outro.
+	if player.IsDJTrack(p.state.player.Track) {
+		var narrKeys []string
+		for k := range p.state.player.Track.Metadata {
+			if strings.HasPrefix(k, "narration.") {
+				narrKeys = append(narrKeys, k)
+			}
+		}
+		introId := p.state.player.Track.Metadata["narration.intro.commentary_id"]
+		jumpId := p.state.player.Track.Metadata["narration.jump.commentary_id"]
+		p.app.log.Debugf("DJ track narration: keys=%d intro_id=%q jump_id=%q", len(narrKeys), introId, jumpId)
+		var narr *player.DJNarration
+		for _, narrType := range []string{"intro", "jump", "outro"} {
+			if n := player.NarrationForTrack(p.state.player.Track, narrType); n != nil {
+				narr = n
+				break
+			}
+		}
+		if narr != nil {
+			narrId, err := player.NarrationSpotifyId(narr.CommentaryId)
+			if err != nil {
+				p.app.log.WithError(err).Warn("failed parsing DJ narration id, skipping to music")
+			} else {
+				narrStream, err := p.player.NewNarrationStream(ctx, p.app.client, narrId, 160, 0)
+				if err != nil {
+					p.app.log.WithError(err).Warn("failed loading DJ narration stream, skipping to music")
+				} else {
+					p.app.log.WithField("commentary_id", narr.CommentaryId).
+						Infof("playing DJ intro narration before %s", spotId.Uri())
+
+					p.primaryStream = narrStream
+					p.djPendingMusicId = spotId
+
+					if err := p.player.SetPrimaryStream(narrStream.Source, paused, drop); err != nil {
+						return fmt.Errorf("failed setting DJ narration stream: %w", err)
+					}
+
+					p.sess.Events().PostPrimaryStreamLoad(narrStream, paused)
+
+					p.state.updateTimestamp()
+					p.state.player.PlaybackId = hex.EncodeToString(narrStream.PlaybackId)
+					p.state.player.Duration = int64(narrStream.Media.Duration())
+					p.state.player.IsPlaying = true
+					p.state.player.IsBuffering = false
+					p.state.setPaused(paused)
+					p.updateState(ctx)
+
+					return nil
+				}
+			}
+		}
 	}
 
 	trackPosition := p.state.trackPosition()
@@ -372,6 +474,50 @@ func (p *AppPlayer) loadCurrentTrack(ctx context.Context, paused, drop bool) err
 		Type: ApiEventTypeMetadata,
 		Data: ApiEventDataMetadata(*p.newApiResponseStatusTrack(p.primaryStream.Media, trackPosition)),
 	})
+	return nil
+}
+
+// loadDJPendingMusic loads the music track that follows a DJ narration clip.
+// Called from handlePlayerEvent when EventTypeNotPlaying fires while
+// djPendingMusicId is set (i.e. the narration just finished).
+func (p *AppPlayer) loadDJPendingMusic(ctx context.Context, spotId *librespot.SpotifyId) error {
+	p.app.log.WithField("uri", spotId.Uri()).Info("narration finished, loading DJ music track")
+
+	if p.primaryStream != nil {
+		p.sess.Events().OnPrimaryStreamUnload(p.primaryStream, p.player.PositionMs())
+		p.primaryStream = nil
+	}
+	p.secondaryStream = nil
+
+	stream, err := p.player.NewStream(ctx, p.app.client, *spotId, p.app.cfg.Bitrate, 0)
+	if err != nil {
+		return fmt.Errorf("failed creating DJ music stream for %s: %w", spotId, err)
+	}
+
+	p.primaryStream = stream
+	if err := p.player.SetPrimaryStream(stream.Source, false, true); err != nil {
+		return fmt.Errorf("failed setting DJ music stream: %w", err)
+	}
+
+	p.sess.Events().PostPrimaryStreamLoad(stream, false)
+
+	p.app.log.WithField("uri", spotId.Uri()).
+		Infof("loaded DJ music %s (duration: %dms)", strconv.QuoteToGraphic(stream.Media.Name()), stream.Media.Duration())
+
+	p.state.updateTimestamp()
+	p.state.player.PlaybackId = hex.EncodeToString(stream.PlaybackId)
+	p.state.player.Duration = int64(stream.Media.Duration())
+	p.state.player.IsPlaying = true
+	p.state.player.IsBuffering = false
+	p.state.setPaused(false)
+	p.updateState(ctx)
+	p.schedulePrefetchNext()
+
+	p.app.server.Emit(&ApiEvent{
+		Type: ApiEventTypeMetadata,
+		Data: ApiEventDataMetadata(*p.newApiResponseStatusTrack(stream.Media, 0)),
+	})
+
 	return nil
 }
 
@@ -584,7 +730,16 @@ func (p *AppPlayer) skipNext(ctx context.Context, track *connectpb.ContextTrack)
 
 	if track != nil {
 		contextSpotType := librespot.InferSpotifyIdTypeFromContextUri(p.state.player.ContextUri)
-		if err := p.state.tracks.TrySeek(ctx, tracks.ContextTrackComparator(contextSpotType, track)); err != nil {
+		if err := p.state.tracks.Seek(ctx, tracks.ContextTrackComparator(contextSpotType, track)); err != nil {
+			// Track not found in our list. For DJ mode, load it directly from
+			// the hint Spotify sent rather than silently restarting from track 0.
+			if player.IsDJTrack(p.state.player.Track) {
+				p.app.log.Warnf("DJ skip target %s not in track list, loading directly", track.Uri)
+				p.state.player.Timestamp = time.Now().UnixMilli()
+				p.state.player.PositionAsOfTimestamp = 0
+				p.state.player.Track = librespot.ContextTrackToProvidedTrack(contextSpotType, track)
+				return p.loadCurrentTrack(ctx, p.state.player.IsPaused, true)
+			}
 			return err
 		}
 
@@ -633,9 +788,18 @@ func (p *AppPlayer) advanceNext(ctx context.Context, forceNext, drop bool) (bool
 
 			// if we could not get the next track we probably ended the context
 			if !hasNextTrack {
+				// DJ contexts manage their queue externally via ClusterUpdate — do not
+				// loop back to track 0 or attempt autoplay when the list is exhausted.
+				// Use djCachedContextUri to reliably detect DJ sessions regardless of
+				// whether the current track carries YourDJ source metadata.
+				isDJ := p.djCachedContextUri != "" && p.state.player.ContextUri == p.djCachedContextUri
+				if isDJ {
+					// Signal the server that we need more tracks.
+					p.djAwaitingLoad = true
+					p.updateState(ctx)
+					return false, nil
+				}
 				hasNextTrack = p.state.tracks.GoStart(ctx)
-
-				// if repeating is disabled move to the first track, but do not start it
 				if !p.state.player.Options.RepeatingContext {
 					hasNextTrack = false
 				}
