@@ -178,7 +178,10 @@ func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg dealer.Message)
 				// (a) Already playing a DJ track — refresh queue in place.
 				// (b) Accepted a DJ play command but have no tracks yet (ContextUri set,
 				//     no track loaded) — start playing from the cluster's current track.
-				alreadyDJ := p.state.active && p.state.player.Track != nil && player.IsDJTrack(p.state.player.Track)
+				// Use djCachedContextUri to detect active DJ sessions. IsDJTrack() is
+			// unreliable here because regular music tracks in a DJ queue don't carry
+			// YourDJ source metadata, and transferred tracks never do.
+			alreadyDJ := p.state.active && p.state.player.Track != nil && contextUri == p.djCachedContextUri
 				pendingDJ := p.djAwaitingLoad && p.state.player.ContextUri == contextUri
 				if alreadyDJ || pendingDJ {
 					currentTrack := func() *connectpb.ContextTrack {
@@ -261,10 +264,10 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 			} else {
 				staticTracks = append(staticTracks, transferState.Queue.Tracks...)
 				p.app.log.WithError(err).Warnf("context resolution failed, building static track list for %s", contextUri)
-				// Record as a known DJ context so advanceNext won't attempt autoplay,
-				// and signal that we want the server to push the full queue.
+				// Mark as a known DJ context so advanceNext won't attempt autoplay.
+				// Do NOT set djAwaitingLoad — we are already on the transferred track
+				// and must not reload it when the cluster update arrives.
 				p.djCachedContextUri = contextUri
-				p.djAwaitingLoad = true
 			}
 			resolver := spclient.NewStaticContextResolver(p.app.log, contextUri, staticTracks)
 			ctxTracks = tracks.NewTrackListFromResolver(p.app.log, resolver)
