@@ -787,8 +787,13 @@ func (p *AppPlayer) advanceNext(ctx context.Context, forceNext, drop bool) (bool
 			// list is the old (pre-DJ) context. Advancing it would play a playlist
 			// song. Signal the server and wait for the cluster push instead.
 			if p.djAwaitingLoad {
-				p.updateState(ctx)
-				return false, nil
+				if p.state.player.ContextUri == p.app.djCachedContextUri {
+					p.updateState(ctx)
+					return false, nil
+				}
+				// Stale flag from a previous DJ session; clear it so normal
+				// playlists are not blocked.
+				p.djAwaitingLoad = false
 			}
 
 			// try to get the next track
