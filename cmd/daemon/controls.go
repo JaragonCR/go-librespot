@@ -279,8 +279,16 @@ func (p *AppPlayer) loadContext(ctx context.Context, spotCtx *connectpb.Context,
 			// If we already have cached DJ tracks for this URI (from a prior cluster push),
 			// use them immediately: Spotify may not send another cluster update because it
 			// already considers the cluster state current.
-			if len(p.app.djCachedNextTracks) > 0 && p.app.djCachedContextUri == spotCtx.Uri && p.app.djCacheIsOurs {
-				p.app.log.Debugf("using pre-cached DJ tracks for %s (%d tracks), loading first track now", spotCtx.Uri, len(p.app.djCachedNextTracks))
+			// Allow cache use if:
+			//   (a) djCacheIsOurs — we populated it while we were the active device, OR
+			//   (b) state.active  — we are currently playing something and the user
+			//       explicitly pressed DJ; Spotify sent a play command but won't re-send
+			//       the cluster it already pushed.
+			// Disallow when both are false: pure cold start with another device's stale
+			// cache — that caused the "Mix it up is gone" bug.
+			canUseCache := p.app.djCacheIsOurs || p.state.active
+			if len(p.app.djCachedNextTracks) > 0 && p.app.djCachedContextUri == spotCtx.Uri && canUseCache {
+				p.app.log.Debugf("using pre-cached DJ tracks for %s (%d tracks, ours=%t active=%t), loading first track now", spotCtx.Uri, len(p.app.djCachedNextTracks), p.app.djCacheIsOurs, p.state.active)
 				currentTrack := p.app.djCachedNextTracks[0]
 				ctxTracks := make([]*connectpb.ContextTrack, 0, len(p.app.djCachedNextTracks))
 				ctxTracks = append(ctxTracks, p.app.djCachedNextTracks...)
