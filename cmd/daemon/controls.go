@@ -245,29 +245,25 @@ func (p *AppPlayer) loadContext(ctx context.Context, spotCtx *connectpb.Context,
 			staticTracks = append(staticTracks, page.Tracks...)
 		}
 		if len(staticTracks) == 0 {
-			if len(p.app.djCachedNextTracks) > 0 && p.app.djCachedContextUri == spotCtx.Uri {
-				// Reuse the DJ queue from the most recent ClusterUpdate.
-				staticTracks = append(staticTracks, p.app.djCachedNextTracks...)
-				p.app.log.WithError(err).Warnf("using cached DJ queue for play command %s (%d tracks)", spotCtx.Uri, len(staticTracks))
-			} else {
-				// DJ contexts send no tracks in play command payloads — Spotify will follow up
-				// with a ClusterUpdate or set_queue. Accept the command and return nil so
-				// Spotify stops retrying. Update context URI so the cluster sync can match.
-				p.app.log.WithError(err).Warnf("no tracks in play command payload for %s, waiting for cluster update", spotCtx.Uri)
-				p.state.player.ContextUri = spotCtx.Uri
-				p.state.player.ContextUrl = spotCtx.Url
-				p.state.player.PositionAsOfTimestamp = 0
-				p.app.djCachedContextUri = spotCtx.Uri
-				p.djAwaitingLoad = true
-				// Stop the player so Spotify sees IsPlaying=false and sends the first DJ track.
-				p.player.Stop()
-				p.primaryStream = nil
-				p.secondaryStream = nil
-				p.state.player.IsPlaying = false
-				p.state.player.IsBuffering = false
-				p.updateState(ctx)
-				return nil
-			}
+			// DJ contexts send no tracks in play command payloads — Spotify will follow up
+			// with a ClusterUpdate. Always go through the djAwaitingLoad path so Spotify
+			// starts a real DJ session for this device (enables Switch It Up, fresh queue).
+			// Do NOT use the stale cache here: that shortcut bypasses the server handshake
+			// and results in Spotify not recognising an active DJ session.
+			p.app.log.WithError(err).Warnf("no tracks in play command payload for %s, waiting for cluster update", spotCtx.Uri)
+			p.state.player.ContextUri = spotCtx.Uri
+			p.state.player.ContextUrl = spotCtx.Url
+			p.state.player.PositionAsOfTimestamp = 0
+			p.app.djCachedContextUri = spotCtx.Uri
+			p.djAwaitingLoad = true
+			// Stop the player so Spotify sees IsPlaying=false and sends the first DJ track.
+			p.player.Stop()
+			p.primaryStream = nil
+			p.secondaryStream = nil
+			p.state.player.IsPlaying = false
+			p.state.player.IsBuffering = false
+			p.updateState(ctx)
+			return nil
 		}
 		p.app.log.WithError(err).Warnf("context resolution failed, building static track list for %s (%d tracks)", spotCtx.Uri, len(staticTracks))
 		resolver := spclient.NewStaticContextResolver(p.app.log, spotCtx.Uri, staticTracks)
