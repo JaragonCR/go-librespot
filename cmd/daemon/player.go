@@ -179,15 +179,19 @@ func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg dealer.Message)
 				if contextUri == "" {
 					contextUri = p.state.player.ContextUri
 				}
-				p.app.djCachedContextUri = contextUri
-				p.app.djCachedNextTracks = make([]*connectpb.ContextTrack, 0, nextCount)
-				for _, t := range clusterState.NextTracks {
-					if t.Uri != "spotify:delimiter" {
-						p.app.djCachedNextTracks = append(p.app.djCachedNextTracks, librespot.ProvidedTrackToContextTrack(t))
+				if nextCount > 0 {
+					p.app.djCachedContextUri = contextUri
+					p.app.djCachedNextTracks = make([]*connectpb.ContextTrack, 0, nextCount)
+					for _, t := range clusterState.NextTracks {
+						if t.Uri != "spotify:delimiter" {
+							p.app.djCachedNextTracks = append(p.app.djCachedNextTracks, librespot.ProvidedTrackToContextTrack(t))
+						}
 					}
+					p.app.djCacheIsOurs = clusterUpdate.Cluster.ActiveDeviceId == p.app.deviceId
+					p.app.log.Debugf("cached DJ next tracks from cluster push (%d tracks for %s, ours=%t)", nextCount, contextUri, p.app.djCacheIsOurs)
+				} else {
+					p.app.log.Debugf("skipping DJ cache update for %s — cluster has 0 next tracks (keeping %d cached)", contextUri, len(p.app.djCachedNextTracks))
 				}
-				p.app.djCacheIsOurs = clusterUpdate.Cluster.ActiveDeviceId == p.app.deviceId
-			p.app.log.Debugf("cached DJ next tracks from cluster push (%d tracks for %s, ours=%t)", nextCount, contextUri, p.app.djCacheIsOurs)
 
 				// Update the live track list if we are the active player with a DJ context.
 				// This covers two cases:
