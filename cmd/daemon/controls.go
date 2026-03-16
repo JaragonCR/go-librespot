@@ -245,24 +245,63 @@ func (p *AppPlayer) loadContext(ctx context.Context, spotCtx *connectpb.Context,
 			staticTracks = append(staticTracks, page.Tracks...)
 		}
 		if len(staticTracks) == 0 {
-			// DJ contexts send no tracks in play command payloads — Spotify will follow up
-			// with a ClusterUpdate. Always go through the djAwaitingLoad path so Spotify
-			// starts a real DJ session for this device (enables Switch It Up, fresh queue).
-			// Do NOT use the stale cache here: that shortcut bypasses the server handshake
-			// and results in Spotify not recognising an active DJ session.
-			p.app.log.WithError(err).Warnf("no tracks in play command payload for %s, waiting for cluster update", spotCtx.Uri)
+			// DJ contexts send no tracks in the play command payload.
+			// First, stop the player and signal IsPlaying=false so Spotify
+			// registers us as wanting a fresh DJ session.
+			p.app.log.WithError(err).Warnf("no tracks in play command payload for %s", spotCtx.Uri)
+			p.app.log.Debugf("djAwaitingLoad: PlayOrigin.FeatureIdentifier=%q stateActive=%t prevTrack=%v prevContextUri=%q",
+				func() string {
+					if p.state.player.PlayOrigin != nil {
+						return p.state.player.PlayOrigin.FeatureIdentifier
+					}
+					return "<nil>"
+				}(),
+				p.state.active,
+				func() string {
+					if p.state.player.Track != nil {
+						return p.state.player.Track.Uri
+					}
+					return "<nil>"
+				}(),
+				p.state.player.ContextUri,
+			)
 			p.state.player.ContextUri = spotCtx.Uri
 			p.state.player.ContextUrl = spotCtx.Url
 			p.state.player.PositionAsOfTimestamp = 0
 			p.app.djCachedContextUri = spotCtx.Uri
-			p.djAwaitingLoad = true
-			// Stop the player so Spotify sees IsPlaying=false and sends the first DJ track.
 			p.player.Stop()
 			p.primaryStream = nil
 			p.secondaryStream = nil
 			p.state.player.IsPlaying = false
 			p.state.player.IsBuffering = false
 			p.updateState(ctx)
+
+			// If we already have cached DJ tracks for this URI (from a prior cluster push),
+			// use them immediately: Spotify may not send another cluster update because it
+			// already considers the cluster state current.
+			if len(p.app.djCachedNextTracks) > 0 && p.app.djCachedContextUri == spotCtx.Uri && p.app.djCacheIsOurs {
+				p.app.log.Debugf("using pre-cached DJ tracks for %s (%d tracks), loading first track now", spotCtx.Uri, len(p.app.djCachedNextTracks))
+				currentTrack := p.app.djCachedNextTracks[0]
+				ctxTracks := make([]*connectpb.ContextTrack, 0, len(p.app.djCachedNextTracks))
+				ctxTracks = append(ctxTracks, p.app.djCachedNextTracks...)
+				resolver := spclient.NewStaticContextResolver(p.app.log, spotCtx.Uri, ctxTracks)
+				newList := tracks.NewTrackListFromResolver(p.app.log, resolver)
+				ctxType := librespot.InferSpotifyIdTypeFromContextUri(spotCtx.Uri)
+				_ = newList.TrySeek(ctx, tracks.ContextTrackComparator(ctxType, currentTrack))
+				p.state.tracks = newList
+				p.state.player.Track = p.state.tracks.CurrentTrack()
+				p.state.player.NextTracks = p.state.tracks.NextTracks(ctx, nil)
+				if err2 := p.loadCurrentTrack(ctx, paused, true); err2 != nil {
+					p.app.log.WithError(err2).Warn("failed loading initial DJ track from cached tracks, will wait for cluster update")
+					p.djAwaitingLoad = true
+				}
+				return nil
+			}
+
+			// No cache available — wait for the cluster update that Spotify will send
+			// once it sees our IsPlaying=false + ContextUri state.
+			p.app.log.Warnf("no cached DJ tracks for %s, waiting for cluster update", spotCtx.Uri)
+			p.djAwaitingLoad = true
 			return nil
 		}
 		p.app.log.WithError(err).Warnf("context resolution failed, building static track list for %s (%d tracks)", spotCtx.Uri, len(staticTracks))
@@ -770,6 +809,14 @@ func (p *AppPlayer) skipNext(ctx context.Context, track *connectpb.ContextTrack)
 		p.state.player.Index = p.state.tracks.Index()
 
 		if err := p.loadCurrentTrack(ctx, p.state.player.IsPaused, true); err != nil {
+			// In DJ mode, narration/media clips appear in the queue as spotify:track: but
+			// return 404 when fetched — skip past them automatically.
+			isDJ := p.state.player.PlayOrigin != nil && p.state.player.PlayOrigin.FeatureIdentifier == "dynamic-sessions"
+			if isDJ {
+				p.app.log.WithError(err).Warnf("DJ track %s failed to load, auto-advancing to next", p.state.player.Track.GetUri())
+				_, advErr := p.advanceNext(ctx, false, true)
+				return advErr
+			}
 			return err
 		}
 		return nil
@@ -907,9 +954,23 @@ func (p *AppPlayer) advanceNext(ctx context.Context, forceNext, drop bool) (bool
 	}
 
 	// load current track into stream
-	if err := p.loadCurrentTrack(ctx, !hasNextTrack, drop); errors.Is(err, librespot.ErrMediaRestricted) || errors.Is(err, librespot.ErrNoSupportedFormats) {
+	isDJSession := p.state.player.PlayOrigin != nil && p.state.player.PlayOrigin.FeatureIdentifier == "dynamic-sessions"
+	if err := p.loadCurrentTrack(ctx, !hasNextTrack, drop); errors.Is(err, librespot.ErrMediaRestricted) || errors.Is(err, librespot.ErrNoSupportedFormats) || (isDJSession && err != nil && !forceNext) {
 		p.app.log.WithError(err).Infof("skipping unplayable media: %s", uri)
 		if forceNext {
+			if isDJSession {
+				// Two consecutive unplayable DJ tracks (e.g. back-to-back narration clips).
+				// Signal Spotify for a fresh queue rather than failing hard.
+				p.app.log.WithError(err).Warnf("DJ: consecutive unplayable tracks, signaling Spotify for more")
+				p.player.Stop()
+				p.primaryStream = nil
+				p.secondaryStream = nil
+				p.state.player.IsPlaying = false
+				p.state.player.IsBuffering = false
+				p.djAwaitingLoad = true
+				p.updateState(ctx)
+				return false, nil
+			}
 			// we failed in finding another track to play, just stop
 			return false, err
 		}

@@ -128,6 +128,10 @@ func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg dealer.Message)
 		}
 
 		stopBeingActive := p.state.active && clusterUpdate.Cluster.ActiveDeviceId != p.app.deviceId && clusterUpdate.Cluster.PlayerState.Timestamp > p.state.lastTransferTimestamp
+		p.app.log.Debugf("cluster decision: activeDeviceId=%q ourDeviceId=%q clusterPlayerTs=%d lastTransferTs=%d stateActive=%t stopBeingActive=%t djAwaitingLoad=%t stateContextUri=%q",
+			clusterUpdate.Cluster.ActiveDeviceId, p.app.deviceId,
+			clusterUpdate.Cluster.PlayerState.Timestamp, p.state.lastTransferTimestamp,
+			p.state.active, stopBeingActive, p.djAwaitingLoad, p.state.player.ContextUri)
 
 		// We are still the active device, do not quit
 		if !stopBeingActive {
@@ -182,7 +186,8 @@ func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg dealer.Message)
 						p.app.djCachedNextTracks = append(p.app.djCachedNextTracks, librespot.ProvidedTrackToContextTrack(t))
 					}
 				}
-				p.app.log.Debugf("cached DJ next tracks from cluster push (%d tracks for %s)", nextCount, contextUri)
+				p.app.djCacheIsOurs = clusterUpdate.Cluster.ActiveDeviceId == p.app.deviceId
+			p.app.log.Debugf("cached DJ next tracks from cluster push (%d tracks for %s, ours=%t)", nextCount, contextUri, p.app.djCacheIsOurs)
 
 				// Update the live track list if we are the active player with a DJ context.
 				// This covers two cases:
@@ -197,6 +202,14 @@ func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg dealer.Message)
 			// cluster) — that case is handled by pendingDJ below.
 			alreadyDJ := p.state.active && p.state.player.Track != nil && contextUri == p.app.djCachedContextUri && !p.djAwaitingLoad
 				pendingDJ := p.djAwaitingLoad && p.state.player.ContextUri == contextUri
+				p.app.log.Debugf("DJ path eval: alreadyDJ=%t pendingDJ=%t djAwaitingLoad=%t stateContextUri=%q clusterContextUri=%q clusterTrack=%v nextTracks=%d",
+					alreadyDJ, pendingDJ, p.djAwaitingLoad, p.state.player.ContextUri, contextUri,
+					func() string {
+						if clusterState.Track != nil {
+							return clusterState.Track.Uri
+						}
+						return "<nil>"
+					}(), nextCount)
 				if alreadyDJ || pendingDJ {
 					currentTrack := func() *connectpb.ContextTrack {
 						if alreadyDJ {
@@ -220,14 +233,15 @@ func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg dealer.Message)
 					p.app.log.Debugf("updated active DJ track list (%d next tracks, pendingDJ=%t)", nextCount, pendingDJ)
 
 					// If we were waiting for the first DJ track (pendingDJ), load it now.
-					if pendingDJ {
+					// Also restart if stuck (alreadyDJ but no primary stream — e.g. after back-to-back narration clips).
+					stuckDJ := alreadyDJ && p.primaryStream == nil
+					if pendingDJ || stuckDJ {
 						p.djAwaitingLoad = false
 						p.state.player.ContextUri = contextUri
-						// Reset position: PositionAsOfTimestamp may carry over from the
-						// previous playlist session and seek past the file end.
 						p.state.player.PositionAsOfTimestamp = 0
+						p.app.log.Debugf("loading DJ track from cluster (pendingDJ=%t stuckDJ=%t)", pendingDJ, stuckDJ)
 						if err := p.loadCurrentTrack(ctx, false, true); err != nil {
-							p.app.log.WithError(err).Warn("failed loading initial DJ track from cluster push")
+							p.app.log.WithError(err).Warn("failed loading DJ track from cluster push")
 						}
 					}
 				}

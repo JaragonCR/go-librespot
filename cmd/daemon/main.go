@@ -58,6 +58,7 @@ type App struct {
 	// arriving on a new session can still use the queue from the last cluster push.
 	djCachedContextUri string
 	djCachedNextTracks []*connectpb.ContextTrack
+	djCacheIsOurs      bool // true when cache was populated while we were the active device
 }
 
 func parseDeviceType(val string) (devicespb.DeviceType, error) {
